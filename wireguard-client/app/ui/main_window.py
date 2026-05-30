@@ -1,19 +1,18 @@
-"""Main application window."""
+"""Main application window: compact, minimal (Proton VPN inspired)."""
 
 from __future__ import annotations
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QPoint, Qt, QTimer, Signal
+from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
     QLabel,
-    QListWidget,
-    QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPushButton,
-    QSizePolicy,
     QVBoxLayout,
     QWidget,
 )
@@ -27,32 +26,49 @@ from ..wireguard import (
 )
 from .styles import STYLESHEET
 
+POWER_GLYPH = "\u23fb"  # power symbol
+
+
+class ClickableFrame(QFrame):
+    """A QFrame that emits ``clicked`` on mouse release (used for the card)."""
+
+    clicked = Signal()
+
+    def mouseReleaseEvent(self, event):  # noqa: N802 (Qt naming)
+        if self.isEnabled() and event.button() == Qt.LeftButton:
+            self.clicked.emit()
+        super().mouseReleaseEvent(event)
+
 
 class MainWindow(QMainWindow):
     def __init__(self, manager: WireGuardManager | None = None) -> None:
         super().__init__()
         self.manager = manager or WireGuardManager()
         self._connected: dict[str, bool] = {}
+        self._tunnels: list[TunnelInfo] = []
+        self._current: str | None = None
 
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(820, 540)
+        self.setFixedSize(380, 620)
         self.setStyleSheet(STYLESHEET)
 
         root = QWidget(objectName="root")
         self.setCentralWidget(root)
-        layout = QHBoxLayout(root)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(0)
+        col = QVBoxLayout(root)
+        col.setContentsMargins(22, 18, 22, 14)
+        col.setSpacing(0)
 
-        layout.addWidget(self._build_sidebar())
-        layout.addWidget(self._build_detail(), stretch=1)
+        col.addLayout(self._build_header())
+        col.addStretch(1)
+        col.addLayout(self._build_status(), stretch=0)
+        col.addStretch(1)
+        col.addWidget(self._build_server_card())
 
         self.statusBar().setObjectName("statusBar")
         self.statusBar().showMessage(f"{APP_NAME} v{__version__}")
 
         self.refresh_tunnels()
 
-        # Poll live status of the selected tunnel.
         self._timer = QTimer(self)
         self._timer.setInterval(2000)
         self._timer.timeout.connect(self._poll_status)
@@ -60,149 +76,132 @@ class MainWindow(QMainWindow):
 
     # -- layout -------------------------------------------------------------------
 
-    def _build_sidebar(self) -> QWidget:
-        sidebar = QFrame(objectName="sidebar")
-        sidebar.setFixedWidth(260)
-        col = QVBoxLayout(sidebar)
-        col.setContentsMargins(16, 18, 16, 16)
-        col.setSpacing(10)
+    def _build_header(self) -> QHBoxLayout:
+        row = QHBoxLayout()
+        brand = QLabel("WIREGUARD", objectName="brand")
+        dot = QLabel("\u25cf", objectName="brandDot")
+        row.addWidget(dot)
+        row.addSpacing(6)
+        row.addWidget(brand)
+        row.addStretch(1)
+        return row
 
-        header = QHBoxLayout()
-        header.setSpacing(6)
-        header.addWidget(QLabel("TUNNELS", objectName="sidebarTitle"))
-        header.addStretch(1)
+    def _build_status(self) -> QVBoxLayout:
+        box = QVBoxLayout()
+        box.setSpacing(16)
 
-        self.add_btn = QPushButton("+", objectName="iconButton")
-        self.add_btn.setToolTip("Import a .conf file")
-        self.add_btn.clicked.connect(self.import_config)
-        self.remove_btn = QPushButton("\u2212", objectName="iconButton")
-        self.remove_btn.setToolTip("Remove selected tunnel")
-        self.remove_btn.clicked.connect(self.delete_tunnel)
-        header.addWidget(self.add_btn)
-        header.addWidget(self.remove_btn)
-        col.addLayout(header)
+        self.power = QPushButton(POWER_GLYPH, objectName="powerButton")
+        self.power.setCursor(Qt.PointingHandCursor)
+        self.power.clicked.connect(self.toggle_connection)
+        box.addWidget(self.power, alignment=Qt.AlignHCenter)
 
-        self.list = QListWidget()
-        self.list.currentItemChanged.connect(lambda *_: self.update_detail())
-        col.addWidget(self.list, stretch=1)
+        self.status_title = QLabel("Disconnected", objectName="statusTitle")
+        self.status_title.setProperty("state", "off")
+        self.status_title.setAlignment(Qt.AlignHCenter)
+        box.addWidget(self.status_title)
 
-        return sidebar
+        self.status_sub = QLabel("", objectName="statusSub")
+        self.status_sub.setAlignment(Qt.AlignHCenter)
+        box.addWidget(self.status_sub)
+        return box
 
-    def _build_detail(self) -> QWidget:
-        wrapper = QWidget()
-        outer = QVBoxLayout(wrapper)
-        outer.setContentsMargins(28, 28, 28, 28)
+    def _build_server_card(self) -> QWidget:
+        self.card = ClickableFrame(objectName="serverCard")
+        self.card.setCursor(Qt.PointingHandCursor)
+        self.card.clicked.connect(self.open_server_menu)
+        row = QHBoxLayout(self.card)
+        row.setContentsMargins(14, 10, 14, 10)
 
-        self.card = QFrame(objectName="detailCard")
-        card = QVBoxLayout(self.card)
-        card.setContentsMargins(28, 26, 28, 26)
-        card.setSpacing(18)
-
-        title_row = QHBoxLayout()
-        self.name_label = QLabel("", objectName="tunnelName")
-        self.badge = QLabel("OFFLINE", objectName="statusBadge")
-        self.badge.setProperty("state", "off")
-        title_row.addWidget(self.name_label)
-        title_row.addStretch(1)
-        title_row.addWidget(self.badge, alignment=Qt.AlignTop)
-        card.addLayout(title_row)
-
-        self.fields_box = QVBoxLayout()
-        self.fields_box.setSpacing(12)
-        self.address_value = self._add_field("Address")
-        self.endpoint_value = self._add_field("Endpoint")
-        self.dns_value = self._add_field("DNS")
-        self.transfer_value = self._add_field("Transfer")
-        card.addLayout(self.fields_box)
-
-        card.addStretch(1)
-
-        self.toggle_btn = QPushButton("Connect", objectName="primary")
-        self.toggle_btn.clicked.connect(self.toggle_connection)
-        card.addWidget(self.toggle_btn)
-
-        # Empty-state hint shown when no tunnel is selected.
-        self.empty_hint = QLabel(
-            "No tunnel selected.\nClick  +  to import a WireGuard .conf file.",
-            objectName="emptyHint",
-        )
-        self.empty_hint.setAlignment(Qt.AlignCenter)
-        self.empty_hint.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-
-        outer.addWidget(self.empty_hint, stretch=1)
-        outer.addWidget(self.card, stretch=1)
-        return wrapper
-
-    def _add_field(self, label: str) -> QLabel:
-        row = QVBoxLayout()
-        row.setSpacing(2)
-        row.addWidget(QLabel(label.upper(), objectName="fieldLabel"))
-        value = QLabel("\u2014", objectName="fieldValue")
-        value.setTextInteractionFlags(Qt.TextSelectableByMouse)
-        value.setWordWrap(True)
-        row.addWidget(value)
-        self.fields_box.addLayout(row)
-        return value
+        texts = QVBoxLayout()
+        texts.setSpacing(2)
+        texts.addWidget(QLabel("SELECTED SERVER", objectName="cardLabel"))
+        self.card_name = QLabel("\u2014", objectName="cardName")
+        self.card_endpoint = QLabel("", objectName="cardEndpoint")
+        texts.addWidget(self.card_name)
+        texts.addWidget(self.card_endpoint)
+        row.addLayout(texts, stretch=1)
+        row.addWidget(QLabel("\u25be", objectName="chevron"), alignment=Qt.AlignVCenter)
+        return self.card
 
     # -- data ---------------------------------------------------------------------
 
     def refresh_tunnels(self, select: str | None = None) -> None:
-        current = select or self.current_name()
-        self.list.blockSignals(True)
-        self.list.clear()
-        for tunnel in self.manager.list_tunnels():
-            item = QListWidgetItem(tunnel.name)
-            item.setData(Qt.UserRole, tunnel)
-            self.list.addItem(item)
-            if tunnel.name == current:
-                self.list.setCurrentItem(item)
-        self.list.blockSignals(False)
-        if self.list.currentItem() is None and self.list.count():
-            self.list.setCurrentRow(0)
+        self._tunnels = self.manager.list_tunnels()
+        names = [t.name for t in self._tunnels]
+        if select and select in names:
+            self._current = select
+        elif self._current not in names:
+            self._current = names[0] if names else None
         self.update_detail()
 
     def current_tunnel(self) -> TunnelInfo | None:
-        item = self.list.currentItem()
-        return item.data(Qt.UserRole) if item else None
-
-    def current_name(self) -> str | None:
-        tunnel = self.current_tunnel()
-        return tunnel.name if tunnel else None
+        for tunnel in self._tunnels:
+            if tunnel.name == self._current:
+                return tunnel
+        return None
 
     def update_detail(self) -> None:
         tunnel = self.current_tunnel()
-        has = tunnel is not None
-        self.card.setVisible(has)
-        self.empty_hint.setVisible(not has)
-        self.remove_btn.setEnabled(has)
-        if not tunnel:
+        if tunnel is None:
+            self.card_name.setText("No config")
+            self.card_endpoint.setText("Click to import a .conf")
+            self.power.setEnabled(False)
+            self.status_title.setText("No config")
+            self._set_prop(self.status_title, "state", "off")
+            self.status_sub.setText("Import a WireGuard config to begin")
             return
-        self.name_label.setText(tunnel.name)
-        self.address_value.setText(tunnel.address or "\u2014")
-        self.endpoint_value.setText(tunnel.endpoint or "\u2014")
-        self.dns_value.setText(tunnel.dns or "\u2014")
+        self.power.setEnabled(True)
+        self.card_name.setText(tunnel.name)
+        self.card_endpoint.setText(tunnel.endpoint or tunnel.address or "")
         self._render_state(tunnel.name)
 
     def _render_state(self, name: str, rx: int = 0, tx: int = 0) -> None:
         connected = self._connected.get(name, False)
-        self.badge.setText("CONNECTED" if connected else "OFFLINE")
-        self.badge.setProperty("state", "on" if connected else "off")
-        self.badge.style().unpolish(self.badge)
-        self.badge.style().polish(self.badge)
+        self._set_prop(self.power, "state", "on" if connected else "off")
+        self._set_prop(self.status_title, "state", "on" if connected else "off")
+        tunnel = self.current_tunnel()
         if connected:
-            self.toggle_btn.setText("Disconnect")
-            self.toggle_btn.setObjectName("danger")
-            self.transfer_value.setText(
+            self.status_title.setText("Connected")
+            self.status_sub.setText(
                 f"\u2193 {human_bytes(rx)}    \u2191 {human_bytes(tx)}"
             )
         else:
-            self.toggle_btn.setText("Connect")
-            self.toggle_btn.setObjectName("primary")
-            self.transfer_value.setText("\u2014")
-        self.toggle_btn.style().unpolish(self.toggle_btn)
-        self.toggle_btn.style().polish(self.toggle_btn)
+            self.status_title.setText("Disconnected")
+            self.status_sub.setText(
+                (tunnel.endpoint or tunnel.address) if tunnel else ""
+            )
+
+    @staticmethod
+    def _set_prop(widget: QWidget, prop: str, value: str) -> None:
+        widget.setProperty(prop, value)
+        widget.style().unpolish(widget)
+        widget.style().polish(widget)
 
     # -- actions ------------------------------------------------------------------
+
+    def open_server_menu(self) -> None:
+        menu = QMenu(self)
+        for tunnel in self._tunnels:
+            action = QAction(tunnel.name, self, checkable=True)
+            action.setChecked(tunnel.name == self._current)
+            action.triggered.connect(
+                lambda _=False, n=tunnel.name: self.select_tunnel(n)
+            )
+            menu.addAction(action)
+        if self._tunnels:
+            menu.addSeparator()
+        import_action = QAction("Import config\u2026", self)
+        import_action.triggered.connect(self.import_config)
+        menu.addAction(import_action)
+        if self._current:
+            remove_action = QAction(f"Remove '{self._current}'", self)
+            remove_action.triggered.connect(self.delete_tunnel)
+            menu.addAction(remove_action)
+        menu.exec(self.card.mapToGlobal(QPoint(0, self.card.height() + 4)))
+
+    def select_tunnel(self, name: str) -> None:
+        self._current = name
+        self.update_detail()
 
     def import_config(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
@@ -219,13 +218,13 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"Imported '{tunnel.name}'", 4000)
 
     def delete_tunnel(self) -> None:
-        name = self.current_name()
+        name = self._current
         if not name:
             return
         confirm = QMessageBox.question(
             self,
-            "Remove tunnel",
-            f"Remove tunnel '{name}'? This deletes the imported config copy.",
+            "Remove server",
+            f"Remove '{name}'? This deletes the imported config copy.",
         )
         if confirm != QMessageBox.Yes:
             return
@@ -236,11 +235,12 @@ class MainWindow(QMainWindow):
                 pass
         self._connected.pop(name, None)
         self.manager.delete_tunnel(name)
+        self._current = None
         self.refresh_tunnels()
         self.statusBar().showMessage(f"Removed '{name}'", 4000)
 
     def toggle_connection(self) -> None:
-        name = self.current_name()
+        name = self._current
         if not name:
             return
         try:
@@ -257,7 +257,7 @@ class MainWindow(QMainWindow):
         self._render_state(name)
 
     def _poll_status(self) -> None:
-        name = self.current_name()
+        name = self._current
         if not name:
             return
         try:
@@ -266,8 +266,7 @@ class MainWindow(QMainWindow):
             return
         if status.connected:
             self._connected[name] = True
-        elif self._connected.get(name) and status.name == name:
-            # Service reports down; reflect reality unless we never connected.
+        elif self._connected.get(name):
             self._connected[name] = False
         self._render_state(name, status.rx_bytes, status.tx_bytes)
 

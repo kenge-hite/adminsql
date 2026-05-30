@@ -1,156 +1,159 @@
-"""Qt stylesheet for a clean, minimal look."""
+"""Qt stylesheet: compact, minimal dark theme (Proton VPN inspired)."""
 
-# A restrained light theme: one accent colour, generous spacing, rounded edges.
-ACCENT = "#2f6df6"
-ACCENT_HOVER = "#2a61dd"
-DANGER = "#e5484d"
-DANGER_HOVER = "#cf3a3f"
+ACCENT = "#7d4dff"        # purple, idle/primary
+ACCENT_HOVER = "#8d63ff"
+CONNECTED = "#1ea885"     # green, connected
+CONNECTED_HOVER = "#27b893"
+BG = "#16141f"
+CARD = "#221f2e"
+CARD_HOVER = "#2b2839"
+TEXT = "#ffffff"
+MUTED = "#9b97ad"
 
 STYLESHEET = f"""
 * {{
     font-family: "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
-    font-size: 14px;
-    color: #1d2433;
+    font-size: 13px;
+    color: {TEXT};
 }}
 
 QMainWindow, #root {{
-    background: #f5f6f8;
+    background: {BG};
 }}
 
-/* ---- Sidebar ---- */
-#sidebar {{
-    background: #ffffff;
-    border-right: 1px solid #e6e8ec;
+#brand {{
+    font-size: 15px;
+    font-weight: 700;
+    letter-spacing: 1px;
 }}
 
-#sidebarTitle {{
-    font-size: 13px;
-    font-weight: 600;
-    color: #8a93a3;
-    padding: 4px 6px;
-}}
-
-QListWidget {{
-    border: none;
-    background: transparent;
-    outline: 0;
-}}
-
-QListWidget::item {{
-    padding: 11px 12px;
-    border-radius: 8px;
-    margin: 2px 0;
-    color: #364152;
-}}
-
-QListWidget::item:hover {{
-    background: #f0f3fa;
-}}
-
-QListWidget::item:selected {{
-    background: #e7eefe;
+#brandDot {{
     color: {ACCENT};
-    font-weight: 600;
-}}
-
-/* ---- Buttons ---- */
-QPushButton {{
-    border: 1px solid #d7dbe2;
-    border-radius: 8px;
-    padding: 7px 14px;
-    background: #ffffff;
-    color: #364152;
-}}
-
-QPushButton:hover {{
-    background: #f0f3fa;
-}}
-
-QPushButton:disabled {{
-    color: #aab1bd;
-    background: #f3f4f6;
-}}
-
-QPushButton#iconButton {{
-    padding: 4px 10px;
-    font-size: 18px;
-    font-weight: 600;
-    min-width: 18px;
-}}
-
-QPushButton#primary {{
-    background: {ACCENT};
-    border: none;
-    color: #ffffff;
-    font-weight: 600;
-    padding: 12px 18px;
     font-size: 15px;
-}}
-
-QPushButton#primary:hover {{
-    background: {ACCENT_HOVER};
-}}
-
-QPushButton#danger {{
-    background: {DANGER};
-    border: none;
-    color: #ffffff;
-    font-weight: 600;
-    padding: 12px 18px;
-    font-size: 15px;
-}}
-
-QPushButton#danger:hover {{
-    background: {DANGER_HOVER};
-}}
-
-/* ---- Detail panel ---- */
-#detailCard {{
-    background: #ffffff;
-    border: 1px solid #e6e8ec;
-    border-radius: 14px;
-}}
-
-#tunnelName {{
-    font-size: 22px;
     font-weight: 700;
 }}
 
-#fieldLabel {{
-    color: #8a93a3;
-    font-size: 12px;
-    font-weight: 600;
+/* ---- Central power button ---- */
+#powerButton {{
+    border-radius: 74px;
+    min-width: 148px;
+    max-width: 148px;
+    min-height: 148px;
+    max-height: 148px;
+    font-size: 52px;
+    color: {TEXT};
+    border: 3px solid {ACCENT};
+    background: rgba(125, 77, 255, 0.12);
 }}
 
-#fieldValue {{
-    color: #1d2433;
-    font-size: 14px;
+#powerButton:hover {{
+    background: rgba(125, 77, 255, 0.22);
 }}
 
-#statusBadge {{
-    border-radius: 11px;
-    padding: 4px 12px;
-    font-size: 12px;
+#powerButton[state="on"] {{
+    border: 3px solid {CONNECTED};
+    background: rgba(30, 168, 133, 0.18);
+    color: {CONNECTED};
+}}
+
+#powerButton[state="on"]:hover {{
+    background: rgba(30, 168, 133, 0.28);
+}}
+
+#powerButton:disabled {{
+    border: 3px solid #3a3747;
+    background: transparent;
+    color: #56536a;
+}}
+
+/* ---- Status text ---- */
+#statusTitle {{
+    font-size: 21px;
     font-weight: 700;
 }}
 
-#statusBadge[state="on"] {{
-    background: #e4f7ec;
-    color: #1f9254;
+#statusTitle[state="on"] {{
+    color: {CONNECTED};
 }}
 
-#statusBadge[state="off"] {{
-    background: #f0f1f3;
-    color: #8a93a3;
+#statusTitle[state="off"] {{
+    color: {TEXT};
 }}
 
-#emptyHint {{
-    color: #8a93a3;
+#statusSub {{
+    color: {MUTED};
+    font-size: 13px;
+}}
+
+/* ---- Server selector card ---- */
+#serverCard {{
+    background: {CARD};
+    border: 1px solid #322f40;
+    border-radius: 12px;
+    padding: 12px 14px;
+    text-align: left;
+}}
+
+#serverCard:hover {{
+    background: {CARD_HOVER};
+}}
+
+#serverCard:disabled {{
+    color: {MUTED};
+}}
+
+#cardLabel {{
+    color: {MUTED};
+    font-size: 11px;
+    font-weight: 600;
+}}
+
+#cardName {{
+    color: {TEXT};
     font-size: 15px;
+    font-weight: 600;
+}}
+
+#cardEndpoint {{
+    color: {MUTED};
+    font-size: 12px;
+}}
+
+#chevron {{
+    color: {MUTED};
+    font-size: 16px;
+}}
+
+/* ---- Popup menu (server list) ---- */
+QMenu {{
+    background: {CARD};
+    border: 1px solid #322f40;
+    border-radius: 10px;
+    padding: 6px;
+}}
+
+QMenu::item {{
+    padding: 8px 22px 8px 14px;
+    border-radius: 7px;
+    color: {TEXT};
+}}
+
+QMenu::item:selected {{
+    background: {CARD_HOVER};
+}}
+
+QMenu::separator {{
+    height: 1px;
+    background: #322f40;
+    margin: 6px 4px;
 }}
 
 #statusBar {{
-    color: #8a93a3;
-    font-size: 12px;
+    color: {MUTED};
+    font-size: 11px;
+}}
+
+QMessageBox {{
+    background: {BG};
 }}
 """
