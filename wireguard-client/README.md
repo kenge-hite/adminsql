@@ -1,17 +1,23 @@
 # WireGuard Client
 
-A minimal WireGuard client with a clean, tidy GUI. Import your existing
-`.conf` files, then connect / disconnect with one click. Packs into a single
-`.exe` for Windows.
+A clean WireGuard client GUI. Import your existing `.conf` files and connect /
+disconnect with one click. Packs into a single `.exe` for Windows.
 
 ![UI](docs/screenshot.png)
 
 ## Features
 
+- Two-pane layout: searchable server list on the left, live connection
+  dashboard on the right.
+- **Quick Connect** and one-click connect / disconnect.
+- Connection stats: live duration timer, download / upload counters.
+- Full tunnel details: address, DNS, endpoint, allowed IPs, public key,
+  latest handshake.
+- **View config** (raw `.conf` with the private key masked).
+- **Settings**: dark / light theme (persisted), connect-on-launch,
+  minimize-to-tray.
+- System tray icon (connect / disconnect / show / quit).
 - Single-file Windows executable (no installer for the GUI itself).
-- Minimal, evenly-spaced layout: tunnel list on the left, details + a single
-  connect/disconnect button on the right.
-- Import standard WireGuard `.conf` files; live status and transfer counters.
 
 ## Requirements
 
@@ -52,4 +58,6 @@ pyinstaller wireguard-client.spec
 | Status      | `wg.exe show <name> dump`                           |
 
 Imported configs are copied to `%APPDATA%\WireGuardClient\tunnels` so the GUI
-keeps a stable copy that the tunnel service references.
+keeps a stable copy that the tunnel service references. Preferences are stored
+in `%APPDATA%\WireGuardClient\settings.json` (`~/.config/WireGuardClient` on
+Linux/macOS).
