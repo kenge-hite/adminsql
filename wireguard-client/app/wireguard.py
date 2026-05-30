@@ -103,6 +103,20 @@ def human_bytes(num: int) -> str:
     return f"{value:.1f} TiB"
 
 
+def human_rate(bytes_per_sec: float) -> str:
+    """Format a transfer rate as a short human readable string."""
+    value = float(bytes_per_sec)
+    if value < 0:
+        value = 0.0
+    for unit in ("B/s", "KB/s", "MB/s", "GB/s"):
+        if value < 1024 or unit == "GB/s":
+            if unit == "B/s":
+                return f"{int(value)} {unit}"
+            return f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{value:.1f} GB/s"
+
+
 def human_handshake(epoch: int) -> str:
     """Format a last-handshake epoch as a relative string."""
     if not epoch:

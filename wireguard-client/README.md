@@ -9,13 +9,23 @@ disconnect with one click. Packs into a single `.exe` for Windows.
 
 - Two-pane layout: searchable server list on the left, live connection
   dashboard on the right.
-- **Quick Connect** and one-click connect / disconnect.
-- Connection stats: live duration timer, download / upload counters.
+- **Animated power button** with press feedback, a connecting spinner and a
+  pulsing glow ring when connected; a breathing status dot.
+- **Live traffic graphs**: sparkline charts plus real-time download / upload
+  rates (B/s → GB/s) computed from transfer deltas.
+- **Quick Connect** and one-click connect / disconnect with a connecting
+  animation and desktop notifications.
+- Connection stats: live duration timer, download / upload totals.
 - Full tunnel details: address, DNS, endpoint, allowed IPs, public key,
-  latest handshake.
+  latest handshake. One-click **copy** of the public key / endpoint.
+- **Pin** favorite servers to the top and jump back to **recent** servers
+  via chips.
 - **View config** (raw `.conf` with the private key masked).
-- **Settings**: dark / light theme (persisted), connect-on-launch,
-  minimize-to-tray.
+- **Settings**: dark / light theme + **accent color** (persisted), animated
+  theme transition, connect-on-launch, minimize-to-tray, notifications, and a
+  **demo mode** that simulates a connection so you can preview the animated UI
+  on any OS.
+- Remembers window size & position. **About** dialog.
 - System tray icon (connect / disconnect / show / quit).
 - Single-file Windows executable (no installer for the GUI itself).
 

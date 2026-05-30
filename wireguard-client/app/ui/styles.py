@@ -39,12 +39,43 @@ _LIGHT = {
 }
 
 
-def palette(theme: str) -> dict:
-    return _LIGHT if theme == "light" else _DARK
+def _clamp(v: int) -> int:
+    return max(0, min(255, v))
 
 
-def build_stylesheet(theme: str = "dark") -> str:
-    c = palette(theme)
+def _mix(hex_color: str, toward: str, ratio: float) -> str:
+    """Blend ``hex_color`` toward ``toward`` by ``ratio`` (0..1)."""
+    a = hex_color.lstrip("#")
+    b = toward.lstrip("#")
+    if len(a) != 6 or len(b) != 6:
+        return hex_color
+    ar, ag, ab = (int(a[i : i + 2], 16) for i in (0, 2, 4))
+    br, bg, bb = (int(b[i : i + 2], 16) for i in (0, 2, 4))
+    r = _clamp(round(ar + (br - ar) * ratio))
+    g = _clamp(round(ag + (bg - ag) * ratio))
+    bl = _clamp(round(ab + (bb - ab) * ratio))
+    return f"#{r:02x}{g:02x}{bl:02x}"
+
+
+def _rgba(hex_color: str, alpha: float) -> str:
+    h = hex_color.lstrip("#")
+    if len(h) != 6:
+        return hex_color
+    r, g, b = (int(h[i : i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r}, {g}, {b}, {alpha})"
+
+
+def palette(theme: str, accent: str | None = None) -> dict:
+    c = dict(_LIGHT if theme == "light" else _DARK)
+    if accent:
+        c["accent"] = accent
+        c["accent_hover"] = _mix(accent, "#ffffff", 0.18)
+        c["sel"] = _rgba(accent, 0.18 if theme == "dark" else 0.12)
+    return c
+
+
+def build_stylesheet(theme: str = "dark", accent: str | None = None) -> str:
+    c = palette(theme, accent)
     return f"""
 * {{
     font-family: "Segoe UI", "Inter", "Helvetica Neue", Arial, sans-serif;
@@ -144,6 +175,37 @@ QToolTip {{
 #statValue[accent="down"] {{ color: {c['green']}; }}
 #statValue[accent="up"] {{ color: {c['accent']}; }}
 #statLabel {{ color: {c['muted']}; font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
+#statRate {{ color: {c['muted']}; font-size: 11px; }}
+
+/* ---------- Hero ---------- */
+#heroCard {{
+    background: {c['card']};
+    border: 1px solid {c['border']};
+    border-radius: 20px;
+}}
+#heroStatus {{ font-size: 22px; font-weight: 800; }}
+#heroStatus[state="on"] {{ color: {c['green']}; }}
+#heroStatus[state="connecting"] {{ color: {c['accent']}; }}
+#heroServer {{ color: {c['muted']}; font-size: 13px; }}
+#heroDuration {{ color: {c['muted']}; font-size: 12px; font-weight: 600; }}
+
+#recentChip {{
+    background: {c['card2']}; border: 1px solid {c['border']};
+    border-radius: 13px; padding: 5px 12px; color: {c['muted']};
+    font-size: 11px; font-weight: 600;
+}}
+#recentChip:hover {{ background: {c['sel']}; color: {c['text']}; border: 1px solid {c['accent']}; }}
+#recentLabel {{ color: {c['muted']}; font-size: 11px; font-weight: 700; letter-spacing: 1px; }}
+
+#copyBtn {{
+    background: transparent; border: none; color: {c['muted']};
+    font-size: 13px; padding: 0px 4px; border-radius: 6px;
+}}
+#copyBtn:hover {{ color: {c['accent']}; background: {c['card2']}; }}
+
+#rowPin {{ color: {c['accent']}; font-size: 11px; }}
+#aboutText {{ color: {c['muted']}; font-size: 12px; }}
+#aboutTitle {{ font-size: 18px; font-weight: 800; }}
 
 #sectionTitle {{ font-size: 12px; font-weight: 800; letter-spacing: 1px; color: {c['muted']}; }}
 #detailKey {{ color: {c['muted']}; font-size: 12px; }}

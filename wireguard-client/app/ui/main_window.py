@@ -1,18 +1,26 @@
-"""Main application window: two-pane WireGuard client."""
+"""Main application window: animated two-pane WireGuard client."""
 
 from __future__ import annotations
 
+import random
 import time
 
-from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction
+from PySide6.QtCore import (
+    QEasingCurve,
+    QPropertyAnimation,
+    Qt,
+    QTimer,
+)
+from PySide6.QtGui import QAction, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QFileDialog,
     QFrame,
+    QGraphicsOpacityEffect,
     QGridLayout,
     QHBoxLayout,
     QLabel,
@@ -20,13 +28,12 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QStackedWidget,
     QSystemTrayIcon,
-    QCheckBox,
-    QMenu,
     QVBoxLayout,
     QWidget,
 )
@@ -39,11 +46,23 @@ from ..wireguard import (
     WireGuardManager,
     human_bytes,
     human_duration,
+    human_rate,
 )
 from .icon import make_app_icon
-from .styles import build_stylesheet
+from .styles import build_stylesheet, palette
+from .widgets import PowerButton, PulseDot, Sparkline
 
 DOT = "\u25cf"
+PIN = "\u2605"
+COPY = "\u29c9"
+
+ACCENTS = [
+    ("Violet", "#7d4dff"),
+    ("Ocean", "#2f8bff"),
+    ("Emerald", "#1ea885"),
+    ("Sunset", "#ff6b4d"),
+    ("Magenta", "#e052b0"),
+]
 
 
 def _shorten(text: str, head: int = 10, tail: int = 6) -> str:
@@ -55,7 +74,7 @@ def _shorten(text: str, head: int = 10, tail: int = 6) -> str:
 class ServerRow(QWidget):
     """Custom row widget shown inside the sidebar server list."""
 
-    def __init__(self, tunnel: TunnelInfo) -> None:
+    def __init__(self, tunnel: TunnelInfo, pinned: bool = False) -> None:
         super().__init__()
         row = QHBoxLayout(self)
         row.setContentsMargins(12, 8, 12, 8)
@@ -68,6 +87,8 @@ class ServerRow(QWidget):
         texts.addWidget(QLabel(tunnel.name, objectName="rowName"))
         texts.addWidget(QLabel(tunnel.host or tunnel.address or "", objectName="rowHost"))
         row.addLayout(texts, stretch=1)
+        self.pin = QLabel(PIN if pinned else "", objectName="rowPin")
+        row.addWidget(self.pin, alignment=Qt.AlignVCenter)
 
     def set_connected(self, connected: bool) -> None:
         self.dot.setProperty("state", "on" if connected else "off")
@@ -84,11 +105,15 @@ class MainWindow(QMainWindow):
         self._since: dict[str, float] = {}
         self._tunnels: list[TunnelInfo] = []
         self._current: str | None = None
+        self._connecting = False
+        # rate tracking: name -> (timestamp, rx, tx)
+        self._samples: dict[str, tuple[float, int, int]] = {}
+        self._demo_bytes: dict[str, tuple[int, int]] = {}
 
         self.setWindowTitle(APP_NAME)
-        self.setMinimumSize(880, 580)
-        self.resize(940, 620)
+        self.setMinimumSize(900, 600)
         self.setWindowIcon(make_app_icon())
+        self._restore_geometry()
         self._apply_theme()
 
         root = QWidget(objectName="root")
@@ -103,6 +128,7 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"{APP_NAME} v{__version__}")
 
         self._build_tray()
+        self._sync_power_colors()
         self.refresh_tunnels(select=self.settings.last_tunnel or None)
 
         self._poll = QTimer(self)
@@ -116,12 +142,12 @@ class MainWindow(QMainWindow):
         self._tick.start()
 
         if self.settings.connect_on_launch and self._current:
-            QTimer.singleShot(200, lambda: self._do_connect(quiet=True))
+            QTimer.singleShot(300, lambda: self._do_connect(quiet=True))
 
     # ------------------------------------------------------------------ sidebar
     def _build_sidebar(self) -> QWidget:
         bar = QFrame(objectName="sidebar")
-        bar.setFixedWidth(252)
+        bar.setFixedWidth(258)
         col = QVBoxLayout(bar)
         col.setContentsMargins(16, 18, 16, 16)
         col.setSpacing(12)
@@ -144,9 +170,20 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(self._filter_list)
         col.addWidget(self.search)
 
+        self.recent_label = QLabel("RECENT", objectName="recentLabel")
+        col.addWidget(self.recent_label)
+        self.recent_row = QHBoxLayout()
+        self.recent_row.setSpacing(6)
+        self.recent_row.setContentsMargins(0, 0, 0, 0)
+        recent_wrap = QWidget()
+        recent_wrap.setLayout(self.recent_row)
+        col.addWidget(recent_wrap)
+
         self.list = QListWidget(objectName="serverList")
         self.list.setFrameShape(QFrame.NoFrame)
         self.list.setVerticalScrollMode(QListWidget.ScrollPerPixel)
+        self.list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.list.customContextMenuRequested.connect(self._row_menu)
         self.list.currentItemChanged.connect(self._on_select)
         col.addWidget(self.list, stretch=1)
 
@@ -171,6 +208,11 @@ class MainWindow(QMainWindow):
         header = QHBoxLayout()
         header.addWidget(QLabel("Connection", objectName="pageTitle"))
         header.addStretch(1)
+        about = QPushButton("\u2139", objectName="settingsBtn")
+        about.setCursor(Qt.PointingHandCursor)
+        about.setToolTip("About")
+        about.clicked.connect(self.open_about)
+        header.addWidget(about)
         gear = QPushButton("\u2699", objectName="settingsBtn")
         gear.setCursor(Qt.PointingHandCursor)
         gear.setToolTip("Settings")
@@ -207,38 +249,40 @@ class MainWindow(QMainWindow):
         col.setContentsMargins(0, 0, 0, 0)
         col.setSpacing(16)
 
-        # status card
-        card = QFrame(objectName="statusCard")
-        inner = QHBoxLayout(card)
-        inner.setContentsMargins(22, 20, 22, 20)
-        left = QVBoxLayout()
-        left.setSpacing(4)
-        dotrow = QHBoxLayout()
-        dotrow.setSpacing(8)
-        self.status_dot = QLabel(DOT, objectName="statusDot")
-        self.status_dot.setProperty("state", "off")
-        self.status_title = QLabel("Disconnected", objectName="statusTitle")
+        # hero card with big power button
+        hero = QFrame(objectName="heroCard")
+        hbox = QVBoxLayout(hero)
+        hbox.setContentsMargins(22, 22, 22, 22)
+        hbox.setSpacing(10)
+
+        self.power = PowerButton(diameter=164)
+        self.power.clicked.connect(self.toggle_connection)
+        hbox.addWidget(self.power, alignment=Qt.AlignHCenter)
+
+        statusrow = QHBoxLayout()
+        statusrow.setSpacing(8)
+        statusrow.addStretch(1)
+        self.status_dot = PulseDot(diameter=11)
+        statusrow.addWidget(self.status_dot, alignment=Qt.AlignVCenter)
+        self.status_title = QLabel("Disconnected", objectName="heroStatus")
         self.status_title.setProperty("state", "off")
-        dotrow.addWidget(self.status_dot)
-        dotrow.addWidget(self.status_title)
-        dotrow.addStretch(1)
-        left.addLayout(dotrow)
-        self.status_server = QLabel("", objectName="statusServer")
-        left.addWidget(self.status_server)
-        inner.addLayout(left, stretch=1)
-        self.connect_btn = QPushButton("Connect", objectName="connectBtn")
-        self.connect_btn.setProperty("state", "off")
-        self.connect_btn.setCursor(Qt.PointingHandCursor)
-        self.connect_btn.clicked.connect(self.toggle_connection)
-        inner.addWidget(self.connect_btn, alignment=Qt.AlignVCenter)
-        col.addWidget(card)
+        statusrow.addWidget(self.status_title)
+        statusrow.addStretch(1)
+        hbox.addLayout(statusrow)
+
+        self.status_server = QLabel("", objectName="heroServer")
+        self.status_server.setAlignment(Qt.AlignHCenter)
+        hbox.addWidget(self.status_server)
+        self.status_duration = QLabel("", objectName="heroDuration")
+        self.status_duration.setAlignment(Qt.AlignHCenter)
+        hbox.addWidget(self.status_duration)
+        col.addWidget(hero)
 
         # stat cards
         stats = QHBoxLayout()
         stats.setSpacing(14)
-        self.stat_duration = self._stat_card(stats, "DURATION")
-        self.stat_down = self._stat_card(stats, "DOWNLOAD", accent="down")
-        self.stat_up = self._stat_card(stats, "UPLOAD", accent="up")
+        self.stat_down = self._stat_card(stats, "DOWNLOAD", accent="down", spark=True)
+        self.stat_up = self._stat_card(stats, "UPLOAD", accent="up", spark=True)
         col.addLayout(stats)
 
         # details
@@ -268,6 +312,14 @@ class MainWindow(QMainWindow):
         dl.addLayout(grid)
 
         actions = QHBoxLayout()
+        ckey = QPushButton(f"{COPY}  Copy key", objectName="ghostBtn")
+        ckey.setCursor(Qt.PointingHandCursor)
+        ckey.clicked.connect(lambda: self._copy_field("public_key"))
+        cep = QPushButton(f"{COPY}  Copy endpoint", objectName="ghostBtn")
+        cep.setCursor(Qt.PointingHandCursor)
+        cep.clicked.connect(lambda: self._copy_field("endpoint"))
+        actions.addWidget(ckey)
+        actions.addWidget(cep)
         actions.addStretch(1)
         view = QPushButton("View config", objectName="ghostBtn")
         view.setCursor(Qt.PointingHandCursor)
@@ -282,18 +334,28 @@ class MainWindow(QMainWindow):
         col.addStretch(1)
         return w
 
-    def _stat_card(self, parent: QHBoxLayout, label: str, accent: str = "") -> QLabel:
+    def _stat_card(self, parent: QHBoxLayout, label: str,
+                   accent: str = "", spark: bool = False) -> dict:
         card = QFrame(objectName="statCard")
         box = QVBoxLayout(card)
         box.setContentsMargins(18, 14, 18, 14)
         box.setSpacing(2)
+        top = QHBoxLayout()
         value = QLabel("\u2014", objectName="statValue")
         if accent:
             value.setProperty("accent", accent)
-        box.addWidget(value)
+        top.addWidget(value)
+        top.addStretch(1)
+        rate = QLabel("", objectName="statRate")
+        top.addWidget(rate, alignment=Qt.AlignBottom)
+        box.addLayout(top)
         box.addWidget(QLabel(label, objectName="statLabel"))
+        line = None
+        if spark:
+            line = Sparkline(capacity=44)
+            box.addWidget(line)
         parent.addWidget(card, stretch=1)
-        return value
+        return {"value": value, "rate": rate, "spark": line}
 
     # ------------------------------------------------------------------ tray
     def _build_tray(self) -> None:
@@ -321,6 +383,10 @@ class MainWindow(QMainWindow):
         if reason == QSystemTrayIcon.Trigger:
             self._show_normal()
 
+    def _notify(self, title: str, message: str, connected: bool = False) -> None:
+        if self.tray and self.settings.notifications:
+            self.tray.showMessage(title, message, make_app_icon(connected), 3000)
+
     def _show_normal(self) -> None:
         self.showNormal()
         self.raise_()
@@ -331,8 +397,19 @@ class MainWindow(QMainWindow):
         QApplication.quit()
 
     # ------------------------------------------------------------------ data
+    def _order_tunnels(self, tunnels: list[TunnelInfo]) -> list[TunnelInfo]:
+        pinned = self.settings.pinned
+        return sorted(
+            tunnels,
+            key=lambda t: (
+                0 if t.name in pinned else 1,
+                pinned.index(t.name) if t.name in pinned else 0,
+                t.name.lower(),
+            ),
+        )
+
     def refresh_tunnels(self, select: str | None = None) -> None:
-        self._tunnels = self.manager.list_tunnels()
+        self._tunnels = self._order_tunnels(self.manager.list_tunnels())
         names = [t.name for t in self._tunnels]
         if select and select in names:
             self._current = select
@@ -344,7 +421,7 @@ class MainWindow(QMainWindow):
         for tunnel in self._tunnels:
             item = QListWidgetItem(self.list)
             item.setData(Qt.UserRole, tunnel.name)
-            widget = ServerRow(tunnel)
+            widget = ServerRow(tunnel, pinned=tunnel.name in self.settings.pinned)
             widget.set_connected(self._connected.get(tunnel.name, False))
             item.setSizeHint(widget.sizeHint())
             self.list.addItem(item)
@@ -358,7 +435,30 @@ class MainWindow(QMainWindow):
         self.quick.setEnabled(has)
         self.stack.setCurrentIndex(0 if has else 1)
         self._filter_list(self.search.text())
+        self._rebuild_recent()
         self.update_detail()
+
+    def _rebuild_recent(self) -> None:
+        while self.recent_row.count():
+            item = self.recent_row.takeAt(0)
+            if item.widget():
+                item.widget().deleteLater()
+        names = [t.name for t in self._tunnels]
+        recents = [n for n in self.settings.recent if n in names][:4]
+        for name in recents:
+            chip = QPushButton(name, objectName="recentChip")
+            chip.setCursor(Qt.PointingHandCursor)
+            chip.clicked.connect(lambda _=False, n=name: self._select_name(n))
+            self.recent_row.addWidget(chip)
+        self.recent_row.addStretch(1)
+        visible = bool(recents)
+        self.recent_label.setVisible(visible)
+
+    def _select_name(self, name: str) -> None:
+        for i in range(self.list.count()):
+            if self.list.item(i).data(Qt.UserRole) == name:
+                self.list.setCurrentRow(i)
+                return
 
     def current_tunnel(self) -> TunnelInfo | None:
         for tunnel in self._tunnels:
@@ -372,6 +472,7 @@ class MainWindow(QMainWindow):
         self._current = current.data(Qt.UserRole)
         self.settings.last_tunnel = self._current or ""
         self.settings.save()
+        self._fade_in(self.stack.currentWidget())
         self.update_detail()
 
     def _filter_list(self, text: str) -> None:
@@ -380,6 +481,29 @@ class MainWindow(QMainWindow):
             item = self.list.item(i)
             name = (item.data(Qt.UserRole) or "").lower()
             item.setHidden(bool(needle) and needle not in name)
+
+    def _row_menu(self, pos) -> None:
+        item = self.list.itemAt(pos)
+        if item is None:
+            return
+        name = item.data(Qt.UserRole)
+        menu = QMenu(self)
+        pinned = name in self.settings.pinned
+        act_pin = menu.addAction("Unpin" if pinned else "Pin to top")
+        act_view = menu.addAction("View config")
+        menu.addSeparator()
+        act_del = menu.addAction("Remove")
+        chosen = menu.exec(self.list.mapToGlobal(pos))
+        if chosen == act_pin:
+            self.settings.toggle_pin(name)
+            self.settings.save()
+            self.refresh_tunnels(select=self._current)
+        elif chosen == act_view:
+            self._current = name
+            self.view_config()
+        elif chosen == act_del:
+            self._current = name
+            self.delete_tunnel()
 
     def update_detail(self) -> None:
         tunnel = self.current_tunnel()
@@ -399,19 +523,29 @@ class MainWindow(QMainWindow):
     def _render_state(self) -> None:
         name = self._current
         connected = self._connected.get(name, False) if name else False
-        self._set_prop(self.status_dot, "state", "on" if connected else "off")
-        self._set_prop(self.status_title, "state", "on" if connected else "off")
-        self._set_prop(self.connect_btn, "state", "on" if connected else "off")
-        self.status_title.setText("Connected" if connected else "Disconnected")
-        self.connect_btn.setText("Disconnect" if connected else "Connect")
+        if self._connecting:
+            state = "connecting"
+        elif connected:
+            state = "on"
+        else:
+            state = "off"
+
+        self.power.set_state(state)
+        c = palette(self.settings.theme, self.settings.accent)
+        self.status_dot.set_color(c["green"] if connected else c["muted"])
+        self.status_dot.set_active(connected)
+        self._set_prop(self.status_title, "state", state)
+        title = {"on": "Connected", "connecting": "Connecting\u2026",
+                 "off": "Disconnected"}[state]
+        self.status_title.setText(title)
+
+        self.connect_label = "Disconnect" if connected else "Connect"
         self.quick.setText("Disconnect" if connected else "Quick Connect")
-        label = "Disconnect" if connected else "Connect"
         if getattr(self, "tray_toggle", None):
-            self.tray_toggle.setText(label)
+            self.tray_toggle.setText(self.connect_label)
         if self.tray:
             self.tray.setIcon(make_app_icon(connected))
         self.setWindowIcon(make_app_icon(connected))
-        # update sidebar dot for current row
         for i in range(self.list.count()):
             item = self.list.item(i)
             widget = self.list.itemWidget(item)
@@ -422,15 +556,28 @@ class MainWindow(QMainWindow):
         name = self._current
         connected = self._connected.get(name, False) if name else False
         if not connected:
-            self.stat_duration.setText("\u2014")
-            self.stat_down.setText("\u2014")
-            self.stat_up.setText("\u2014")
+            self.stat_down["value"].setText("\u2014")
+            self.stat_up["value"].setText("\u2014")
+            self.stat_down["rate"].setText("")
+            self.stat_up["rate"].setText("")
+            self.status_duration.setText("")
             self._detail_values["handshake"].setText("\u2014")
             return
         since = self._since.get(name, time.time())
-        self.stat_duration.setText(human_duration(int(time.time() - since)))
+        self.status_duration.setText("\u23f1  " + human_duration(int(time.time() - since)))
 
     # ------------------------------------------------------------------ actions
+    def _copy_field(self, key: str) -> None:
+        tunnel = self.current_tunnel()
+        if not tunnel:
+            return
+        value = {"public_key": tunnel.public_key, "endpoint": tunnel.endpoint}.get(key, "")
+        if not value:
+            self.statusBar().showMessage("Nothing to copy", 2500)
+            return
+        QGuiApplication.clipboard().setText(value)
+        self.statusBar().showMessage(f"Copied {key.replace('_', ' ')} to clipboard", 2500)
+
     def import_config(self) -> None:
         path, _ = QFileDialog.getOpenFileName(
             self, "Import WireGuard config", "", "WireGuard config (*.conf)"
@@ -461,6 +608,13 @@ class MainWindow(QMainWindow):
                 pass
         self._connected.pop(name, None)
         self._since.pop(name, None)
+        self._samples.pop(name, None)
+        self._demo_bytes.pop(name, None)
+        if name in self.settings.pinned:
+            self.settings.pinned.remove(name)
+        if name in self.settings.recent:
+            self.settings.recent.remove(name)
+        self.settings.save()
         self.manager.delete_tunnel(name)
         self._current = None
         self.refresh_tunnels()
@@ -497,31 +651,49 @@ class MainWindow(QMainWindow):
 
     def toggle_connection(self) -> None:
         name = self._current
-        if not name:
+        if not name or self._connecting:
             return
         if self._connected.get(name):
             self._do_disconnect()
         else:
-            self._do_connect()
+            self._begin_connect()
 
-    def _do_connect(self, quiet: bool = False) -> None:
+    def _begin_connect(self) -> None:
         name = self._current
         if not name:
             return
+        self._connecting = True
+        self._render_state()
+        self.statusBar().showMessage(f"Connecting to '{name}'\u2026", 2000)
+        QTimer.singleShot(900, lambda: self._do_connect(name))
+
+    def _do_connect(self, name: str | None = None, quiet: bool = False) -> None:
+        name = name or self._current
+        if not name:
+            self._connecting = False
+            return
         try:
-            self.manager.connect(name)
+            if self.settings.demo_mode:
+                self._demo_bytes[name] = (0, 0)
+            else:
+                self.manager.connect(name)
             self._connected[name] = True
             self._since[name] = time.time()
+            self._samples.pop(name, None)
+            self.settings.mark_recent(name)
+            self.settings.save()
+            self._reset_sparks()
             self.statusBar().showMessage(f"Connected '{name}'", 4000)
-            if self.tray:
-                self.tray.showMessage(APP_NAME, f"Connected to {name}",
-                                      make_app_icon(True), 3000)
+            self._notify(APP_NAME, f"Connected to {name}", connected=True)
         except WireGuardError as exc:
             if quiet:
                 self.statusBar().showMessage(str(exc), 8000)
             else:
                 self._error(str(exc))
+        finally:
+            self._connecting = False
         self._render_state()
+        self._rebuild_recent()
         self._update_stats()
 
     def _do_disconnect(self) -> None:
@@ -529,18 +701,31 @@ class MainWindow(QMainWindow):
         if not name:
             return
         try:
-            self.manager.disconnect(name)
+            if not self.settings.demo_mode:
+                self.manager.disconnect(name)
         except WireGuardError as exc:
             self._error(str(exc))
         self._connected[name] = False
         self._since.pop(name, None)
+        self._samples.pop(name, None)
+        self._demo_bytes.pop(name, None)
+        self._reset_sparks()
         self.statusBar().showMessage(f"Disconnected '{name}'", 4000)
+        self._notify(APP_NAME, f"Disconnected from {name}")
         self._render_state()
         self._update_stats()
+
+    def _reset_sparks(self) -> None:
+        for stat in (self.stat_down, self.stat_up):
+            if stat["spark"]:
+                stat["spark"].reset()
 
     def _poll_status(self) -> None:
         name = self._current
         if not name:
+            return
+        if self.settings.demo_mode and self._connected.get(name):
+            self._poll_demo(name)
             return
         try:
             status = self.manager.status(name)
@@ -550,16 +735,41 @@ class MainWindow(QMainWindow):
         if status.connected and name not in self._since:
             self._since[name] = time.time()
         if status.connected:
-            self.stat_down.setText(human_bytes(status.rx_bytes))
-            self.stat_up.setText(human_bytes(status.tx_bytes))
+            self._apply_traffic(name, status.rx_bytes, status.tx_bytes)
             self._detail_values["handshake"].setText(status.last_handshake or "\u2014")
         self._render_state()
+
+    def _poll_demo(self, name: str) -> None:
+        rx, tx = self._demo_bytes.get(name, (0, 0))
+        rx += random.randint(40_000, 900_000)
+        tx += random.randint(8_000, 250_000)
+        self._demo_bytes[name] = (rx, tx)
+        self._apply_traffic(name, rx, tx)
+        self._detail_values["handshake"].setText("just now")
+        self._render_state()
+
+    def _apply_traffic(self, name: str, rx: int, tx: int) -> None:
+        now = time.time()
+        prev = self._samples.get(name)
+        self._samples[name] = (now, rx, tx)
+        self.stat_down["value"].setText(human_bytes(rx))
+        self.stat_up["value"].setText(human_bytes(tx))
+        if prev:
+            dt = max(0.001, now - prev[0])
+            rx_rate = max(0, (rx - prev[1]) / dt)
+            tx_rate = max(0, (tx - prev[2]) / dt)
+            self.stat_down["rate"].setText(human_rate(rx_rate))
+            self.stat_up["rate"].setText(human_rate(tx_rate))
+            if self.stat_down["spark"]:
+                self.stat_down["spark"].push(rx_rate)
+            if self.stat_up["spark"]:
+                self.stat_up["spark"].push(tx_rate)
 
     # ------------------------------------------------------------------ settings
     def open_settings(self) -> None:
         dialog = QDialog(self)
         dialog.setWindowTitle("Settings")
-        dialog.setMinimumWidth(320)
+        dialog.setMinimumWidth(340)
         box = QVBoxLayout(dialog)
         box.setSpacing(14)
         box.addWidget(QLabel("Settings", objectName="dialogTitle"))
@@ -573,12 +783,30 @@ class MainWindow(QMainWindow):
         theme_row.addWidget(theme)
         box.addLayout(theme_row)
 
+        accent_row = QHBoxLayout()
+        accent_row.addWidget(QLabel("Accent color"))
+        accent_row.addStretch(1)
+        accent = QComboBox()
+        for label, _ in ACCENTS:
+            accent.addItem(label)
+        cur = next((i for i, (_, v) in enumerate(ACCENTS)
+                    if v == self.settings.accent), 0)
+        accent.setCurrentIndex(cur)
+        accent_row.addWidget(accent)
+        box.addLayout(accent_row)
+
         launch = QCheckBox("Connect on launch")
         launch.setChecked(self.settings.connect_on_launch)
         box.addWidget(launch)
         tray = QCheckBox("Minimize to tray on close")
         tray.setChecked(self.settings.minimize_to_tray)
         box.addWidget(tray)
+        notif = QCheckBox("Show desktop notifications")
+        notif.setChecked(self.settings.notifications)
+        box.addWidget(notif)
+        demo = QCheckBox("Demo mode (simulate connection and traffic)")
+        demo.setChecked(self.settings.demo_mode)
+        box.addWidget(demo)
 
         buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
         for b in buttons.buttons():
@@ -590,14 +818,97 @@ class MainWindow(QMainWindow):
 
         if dialog.exec() == QDialog.Accepted:
             self.settings.theme = "dark" if theme.currentIndex() == 0 else "light"
+            self.settings.accent = ACCENTS[accent.currentIndex()][1]
             self.settings.connect_on_launch = launch.isChecked()
             self.settings.minimize_to_tray = tray.isChecked()
+            self.settings.notifications = notif.isChecked()
+            self.settings.demo_mode = demo.isChecked()
             self.settings.save()
-            self._apply_theme()
+            self._sync_power_colors()
+            self._apply_theme(animate=True)
+            self._render_state()
             self.statusBar().showMessage("Settings saved", 3000)
 
-    def _apply_theme(self) -> None:
-        self.setStyleSheet(build_stylesheet(self.settings.theme))
+    def open_about(self) -> None:
+        dialog = QDialog(self)
+        dialog.setWindowTitle(f"About {APP_NAME}")
+        dialog.setMinimumWidth(340)
+        box = QVBoxLayout(dialog)
+        box.setSpacing(10)
+        box.addWidget(QLabel(APP_NAME, objectName="aboutTitle"))
+        box.addWidget(QLabel(f"Version {__version__}", objectName="aboutText"))
+        box.addWidget(QLabel(
+            "A lightweight WireGuard client.\n"
+            "Imports .conf tunnels and connects through the official\n"
+            "WireGuard for Windows service. Live status, traffic graphs,\n"
+            "themes and system-tray control included.",
+            objectName="aboutText"))
+        link = QLabel(
+            '<a href="https://www.wireguard.com/">wireguard.com</a>',
+            objectName="aboutText")
+        link.setOpenExternalLinks(True)
+        box.addWidget(link)
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        buttons.rejected.connect(dialog.reject)
+        buttons.accepted.connect(dialog.accept)
+        box.addWidget(buttons)
+        dialog.exec()
+
+    def _sync_power_colors(self) -> None:
+        c = palette(self.settings.theme, self.settings.accent)
+        self.power.set_colors(c["accent"], c["green"], c["muted"], c["card2"])
+        if self.stat_down["spark"]:
+            self.stat_down["spark"].set_color(c["green"])
+        if self.stat_up["spark"]:
+            self.stat_up["spark"].set_color(c["accent"])
+
+    def _apply_theme(self, animate: bool = False) -> None:
+        self.setStyleSheet(build_stylesheet(self.settings.theme, self.settings.accent))
+        if animate:
+            self._fade_window()
+
+    def _fade_window(self) -> None:
+        anim = QPropertyAnimation(self, b"windowOpacity", self)
+        anim.setDuration(220)
+        anim.setStartValue(0.55)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
+
+    def _fade_in(self, widget: QWidget | None) -> None:
+        if widget is None:
+            return
+        effect = QGraphicsOpacityEffect(widget)
+        widget.setGraphicsEffect(effect)
+        anim = QPropertyAnimation(effect, b"opacity", self)
+        anim.setDuration(220)
+        anim.setStartValue(0.25)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
+
+    # ------------------------------------------------------------------ geometry
+    def _restore_geometry(self) -> None:
+        s = self.settings
+        if s.win_w > 200 and s.win_h > 200:
+            self.resize(s.win_w, s.win_h)
+        else:
+            self.resize(960, 660)
+        if s.win_x >= 0 and s.win_y >= 0:
+            screen = QGuiApplication.primaryScreen()
+            avail = screen.availableGeometry() if screen else None
+            if avail and avail.contains(s.win_x, s.win_y):
+                self.move(s.win_x, s.win_y)
+
+    def _save_geometry(self) -> None:
+        if self.isMaximized() or self.isMinimized():
+            return
+        self.settings.win_w = self.width()
+        self.settings.win_h = self.height()
+        self.settings.win_x = max(0, self.x())
+        self.settings.win_y = max(0, self.y())
+        self.settings.save()
 
     # ------------------------------------------------------------------ helpers
     @staticmethod
@@ -611,13 +922,12 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(message, 6000)
 
     def closeEvent(self, event):  # noqa: N802 (Qt naming)
+        self._save_geometry()
         if getattr(self, "_force_quit", False) or not self.settings.minimize_to_tray \
                 or not self.tray:
             super().closeEvent(event)
             return
         event.ignore()
         self.hide()
-        self.tray.showMessage(
-            APP_NAME, "Still running in the tray. Right-click the icon to quit.",
-            make_app_icon(any(self._connected.values())), 3000,
-        )
+        self._notify(APP_NAME, "Still running in the tray. Right-click the icon to quit.",
+                     any(self._connected.values()))
