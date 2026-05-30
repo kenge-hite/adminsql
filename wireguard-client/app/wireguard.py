@@ -19,6 +19,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -39,6 +40,13 @@ class TunnelInfo:
     dns: str = ""
     endpoint: str = ""
     public_key: str = ""
+    allowed_ips: str = ""
+    keepalive: str = ""
+
+    @property
+    def host(self) -> str:
+        """Endpoint host without the port, for compact display."""
+        return self.endpoint.rsplit(":", 1)[0] if self.endpoint else ""
 
 
 @dataclass
@@ -50,6 +58,7 @@ class TunnelStatus:
     rx_bytes: int = 0
     tx_bytes: int = 0
     last_handshake: str = ""
+    handshake_epoch: int = 0
 
 
 class WireGuardError(Exception):
@@ -92,6 +101,35 @@ def human_bytes(num: int) -> str:
             return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} {unit}"
         value /= 1024
     return f"{value:.1f} TiB"
+
+
+def human_handshake(epoch: int) -> str:
+    """Format a last-handshake epoch as a relative string."""
+    if not epoch:
+        return ""
+    delta = int(time.time()) - epoch
+    if delta < 0:
+        delta = 0
+    if delta < 5:
+        return "just now"
+    if delta < 60:
+        return f"{delta}s ago"
+    if delta < 3600:
+        return f"{delta // 60}m ago"
+    if delta < 86400:
+        return f"{delta // 3600}h ago"
+    return f"{delta // 86400}d ago"
+
+
+def human_duration(seconds: int) -> str:
+    """Format an elapsed duration as H:MM:SS or M:SS."""
+    if seconds < 0:
+        seconds = 0
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}:{m:02d}:{s:02d}"
+    return f"{m}:{s:02d}"
 
 
 class WireGuardManager:
@@ -166,7 +204,28 @@ class WireGuardManager:
                     info.endpoint = value
                 elif key == "publickey":
                     info.public_key = value
+                elif key == "allowedips":
+                    info.allowed_ips = value
+                elif key == "persistentkeepalive":
+                    info.keepalive = value
         return info
+
+    def config_text(self, name: str, mask_secrets: bool = True) -> str:
+        """Return the raw config text, optionally masking private keys."""
+        conf = self.config_dir / f"{name}.conf"
+        if not conf.exists():
+            raise WireGuardError(f"Config not found for tunnel '{name}'.")
+        text = conf.read_text(encoding="utf-8", errors="replace")
+        if not mask_secrets:
+            return text
+        out = []
+        for raw in text.splitlines():
+            if raw.strip().lower().startswith("privatekey"):
+                key = raw.split("=", 1)[0]
+                out.append(f"{key}= (hidden)")
+            else:
+                out.append(raw)
+        return "\n".join(out)
 
     # -- connection control -------------------------------------------------------
 
@@ -215,10 +274,10 @@ class WireGuardManager:
                     handshake = int(fields[4])
                     status.rx_bytes += int(fields[5])
                     status.tx_bytes += int(fields[6])
-                    if handshake:
-                        status.last_handshake = "active"
+                    status.handshake_epoch = max(status.handshake_epoch, handshake)
                 except ValueError:
                     continue
+        status.last_handshake = human_handshake(status.handshake_epoch)
         return status
 
     # -- helpers ------------------------------------------------------------------
